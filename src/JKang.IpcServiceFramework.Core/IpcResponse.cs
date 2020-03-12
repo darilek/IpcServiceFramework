@@ -1,5 +1,7 @@
 ﻿using System;
+using System.IO;
 using System.Reflection;
+using System.Runtime.Serialization.Formatters.Binary;
 using Newtonsoft.Json;
 
 namespace JKang.IpcServiceFramework
@@ -7,13 +9,14 @@ namespace JKang.IpcServiceFramework
     public class IpcResponse
     {
         [JsonConstructor]
-        private IpcResponse(bool succeed, object data, string failure, string failureDetails, bool userCodeFailure)
+        private IpcResponse(bool succeed, object data, string failure, string failureDetails, bool userCodeFailure, byte[] exceptionData = null)
         {
             Succeed = succeed;
             Data = data;
             Failure = failure;
             FailureDetails = failureDetails;
             UserCodeFailure = userCodeFailure;
+            ExceptionData = exceptionData;
         }
 
         public static IpcResponse Fail(string failure)
@@ -36,6 +39,15 @@ namespace JKang.IpcServiceFramework
             if (includeDetails)
             {
                 details = ex.ToString();
+
+                using (var ms = new MemoryStream())
+                {
+                    BinaryFormatter bf = new BinaryFormatter();
+                    bf.Serialize(ms, ex);
+
+                    return new IpcResponse(false, null, message, details, userFailure, ms.ToArray());
+
+                }
             }
 
             return new IpcResponse(false, null, message, details, userFailure);
@@ -52,14 +64,51 @@ namespace JKang.IpcServiceFramework
         public string FailureDetails { get; }
         public bool UserCodeFailure { get; set; }
 
+        public byte[] ExceptionData { get; }
+
         public Exception GetException()
         {
+            Exception ex = GeFirstUsableException();
             if (UserCodeFailure)
             {
-                throw new IpcServerUserCodeException(Failure, FailureDetails);
+                if (ex == null)
+                    throw new IpcServerUserCodeException(Failure, FailureDetails);
+                //throw new IpcServerUserCodeException(Failure, ex);
+                throw ex;
             }
 
-            throw new IpcServerException(Failure, FailureDetails);
+            if (ex == null)
+                throw new IpcServerException(Failure, FailureDetails);
+            //throw new IpcServerException(Failure, ex);
+            throw ex;
+        }
+
+        private Exception GeFirstUsableException()
+        {
+            if (ExceptionData != null)
+            {
+                using (var ms = new MemoryStream(ExceptionData))
+                {
+                    BinaryFormatter bf = new BinaryFormatter();
+                    var obj = bf.Deserialize(ms);
+                    if (obj is Exception ex)
+                    {
+                        var e = ex;
+                        while (e != null)
+                        {
+                            if (!(e is TargetInvocationException))
+                            {
+                                return e;
+                            }
+
+                            e = e.InnerException;
+                        }
+                        return ex;
+                    }
+                }
+            }
+
+            return null;
         }
 
         private static string GetFirstUsableMessage(Exception ex)
